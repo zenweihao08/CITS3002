@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
 
 #define BUFFER_SIZE 1024
 
@@ -147,6 +148,66 @@ int validate_moves(char* buf, int client_fd,int* player_lives){
     return 0;
 }
 
+void *thread_func(char* buf, int user_id, int client_fd, int player_num){
+    while (1) {  
+        buf = calloc(BUFFER_SIZE, sizeof(char));
+        int read = recv(client_fd, buf, BUFFER_SIZE, 0);
+        read_check(read);
+        int player_lives = 4;
+        //read packets, if contain "INIT" inside packets then initialize the game.
+        if (strstr(buf, "INIT") != NULL){
+            buf[0] = '\0';
+            sprintf(buf, "WELCOME,%d",user_id);
+            int err = send(client_fd, buf, strlen(buf), 0); 
+            //wait for 1 second to send welcome and start separately
+            sleep(1);
+            buf[0] = '\0';
+            sprintf(buf,"START,%d,%d",player_num,player_lives);
+            err = send(client_fd, buf, strlen(buf), 0);
+            if(send_check(err)==0){
+                while(1){
+                    if(player_lives>0){
+                        struct pollfd fd;
+                        int ret;
+
+                        fd.fd = client_fd;
+                        fd.events = POLLIN;
+                        //server timeout 5 seconds waiting for the client response
+                        ret = poll(&fd,1,5000);
+
+                        switch(ret){
+                            case -1:
+                                break;
+                            case 0:
+                                --player_lives;
+                                if(player_lives==0){
+                                    char* outcome = "ELIM";
+                                    send_mess(buf,client_fd,outcome);
+                                }
+                                else{
+                                    char* outcome = "FAIL";
+                                    send_mess(buf,client_fd,outcome);
+                                }
+                                break;
+                            default:
+                                buf = calloc(BUFFER_SIZE, sizeof(char));
+                                int read2 = recv(client_fd, buf, BUFFER_SIZE, 0);
+                                read_check(read2);
+                                validate_moves(buf,client_fd,&player_lives);
+                        }
+                    }
+                    else{
+                        free(buf);
+                        printf("Connection disconnected from player %d\n",user_id);
+                        close(client_fd);
+                        exit(EXIT_SUCCESS);
+                    }
+                }
+            }
+        }
+    }
+}
+
 int main (int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr,"Usage: %s [port]\n",argv[0]);
@@ -163,6 +224,8 @@ int main (int argc, char *argv[]) {
 
     int err, opt_val, pid;
     char *buf;
+
+    pid_t childpid;
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -197,6 +260,7 @@ int main (int argc, char *argv[]) {
     //initializing user_id and number of players
     int user_id = 0;
     int player_num = 0;
+
     while (1) {
         socklen_t client_len = sizeof(client);
         client_fd = accept(server_fd, (struct sockaddr *) &client, &client_len);
@@ -204,74 +268,32 @@ int main (int argc, char *argv[]) {
         if (client_fd < 0) {
             fprintf(stderr,"Could not establish new connection\n");
             exit(EXIT_FAILURE);
-        } 
+        }
         else{
-            printf("Connection accepted from %s:%d\n", inet_ntoa(client.sin_addr),ntohs(client.sin_port));
-            //if the connection successful increment the player_id and number of players.
             user_id++;
             player_num++;
-        }
-
-        while (1) {  
-            buf = calloc(BUFFER_SIZE, sizeof(char));
-            int read = recv(client_fd, buf, BUFFER_SIZE, 0);
-            read_check(read);
-            int player_lives = 4;
-            //read packets, if contain "INIT" inside packets then initialize the game.
-            if (strstr(buf, "INIT") != NULL){
-                buf[0] = '\0';
-                sprintf(buf, "WELCOME,%d",user_id);
-                err = send(client_fd, buf, strlen(buf), 0); 
-                //wait for 1 second to send welcome and start separately
-                sleep(1);
-                buf[0] = '\0';
-                sprintf(buf,"START,%d,%d",player_num,player_lives);
-                err = send(client_fd, buf, strlen(buf), 0);
-                if(send_check(err)==0){
-                    while(1){
-                        if(player_lives>0){
-                            struct pollfd fd;
-                            int ret;
-
-                            fd.fd = client_fd;
-                            fd.events = POLLIN;
-                            //server timeout 5 seconds waiting for the client response
-                            ret = poll(&fd,1,5000);
-
-                            switch(ret){
-                                case -1:
-                                    break;
-                                case 0:
-                                    --player_lives;
-                                    if(player_lives==0){
-                                        char* outcome = "ELIM";
-                                        send_mess(buf,client_fd,outcome);
-                                    }
-                                    else{
-                                        char* outcome = "FAIL";
-                                        send_mess(buf,client_fd,outcome);
-                                    }
-                                    break;
-                                default:
-                                    buf = calloc(BUFFER_SIZE, sizeof(char));
-                                    int read2 = recv(client_fd, buf, BUFFER_SIZE, 0);
-                                    read_check(read2);
-                                    validate_moves(buf,client_fd,&player_lives);
-                            }
-                        }
-                        else{
-                            free(buf);
-                            printf("Connection disconnected from %s:%d\n", inet_ntoa(client.sin_addr),ntohs(client.sin_port));
-                            close(client_fd);
-                            close(server_fd);
-                            exit(EXIT_SUCCESS);
-                        }
-
-                    }
+            printf("Connection accepted from player %d\n",user_id);
+            if((childpid = fork()) == 0){
+                while(1){
+                    thread_func(buf,user_id, client_fd,player_num);
                 }
             }
+            else{
+                close(server_fd);
+            }
         }
-        close(client_fd);
+
+        
+        // else{
+        //     printf("Connection accepted\n");
+        //     //if the connection successful increment the player_id and number of players.
+        //     user_id++;
+        //     player_num++;
+        //     pthread_t server_t;
+        //     pthread_create(&server_t,NULL,thread_func(buf,user_id, client_fd,player_num),&client_fd);
+        //     pthread_join( server_t , NULL);
+        // }
+        
     }
     return 0;
 }
