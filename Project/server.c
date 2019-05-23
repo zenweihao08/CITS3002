@@ -274,12 +274,11 @@ int main (int argc, char *argv[]) {
             player_num++;
             printf("Connection accepted from player %d\n",user_id);
             if((childpid = fork()) == 0){
+                close(server_fd);
+
                 while(1){
                     thread_func(buf,user_id, client_fd,player_num);
                 }
-            }
-            else{
-                close(server_fd);
             }
         }
 
